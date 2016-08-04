@@ -33,8 +33,7 @@
         android:id="@+id/preview_cover"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@android:color/black"
-        android:visibility="gone" />
+        android:background="@android:color/black" />
     <View
         android:id="@+id/flash_overlay"
         android:layout_width="match_parent"
@@ -63,7 +62,7 @@
                 android:layout_height="wrap_content"
                 android:layout_width="wrap_content"
                 android:layout_marginLeft="50dp"
-                android:padding="23dp"
+                android:padding="38dp"
                 android:src="@drawable/btn_pause_recording"/>
             <include layout="@layout/viewfinder_labels_video"
                 android:id="@+id/labels" />

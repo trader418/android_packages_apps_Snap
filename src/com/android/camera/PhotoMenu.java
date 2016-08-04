@@ -153,6 +153,7 @@ public class PhotoMenu extends MenuController
                 CameraSettings.KEY_ISO,
                 CameraSettings.KEY_EXPOSURE,
                 CameraSettings.KEY_WHITE_BALANCE,
+                CameraSettings.KEY_QC_CHROMA_FLASH,
                 CameraSettings.KEY_FOCUS_MODE,
                 CameraSettings.KEY_FOCUS_TIME,
                 CameraSettings.KEY_SHUTTER_SPEED,
@@ -180,6 +181,7 @@ public class PhotoMenu extends MenuController
                 CameraSettings.KEY_ISO,
                 CameraSettings.KEY_EXPOSURE,
                 CameraSettings.KEY_WHITE_BALANCE,
+                CameraSettings.KEY_QC_CHROMA_FLASH,
                 CameraSettings.KEY_FOCUS_MODE,
                 CameraSettings.KEY_FOCUS_TIME,
                 CameraSettings.KEY_SHUTTER_SPEED,
@@ -694,6 +696,13 @@ public class PhotoMenu extends MenuController
                         .findPreference(prefKey);
                 if (pref == null)
                     return;
+
+                if (prefKey.equals(CameraSettings.KEY_CAMERA_ID)) {
+                    // Hide the camera control while switching the camera.
+                    // The camera control will be added back when
+                    // onCameraPickerClicked is completed
+                    mUI.hideUI();
+                }
                 int index = pref.findIndexOfValue(pref.getValue());
                 CharSequence[] values = pref.getEntryValues();
                 index = (index + 1) % values.length;
@@ -751,6 +760,7 @@ public class PhotoMenu extends MenuController
         }
 
         CharSequence[] entries = pref.getEntries();
+        CharSequence[] entryValues = pref.getEntryValues();
 
         int[] thumbnails = pref.getThumbnailIds();
 
@@ -825,6 +835,11 @@ public class PhotoMenu extends MenuController
             imageView.setImageResource(thumbnails[i]);
             label.setText(entries[i]);
             layout.addView(layout2);
+
+            // ASD only available when developer options are enabled.
+            if(entryValues[i].equals("asd")) {
+                layout2.setVisibility(mActivity.isDeveloperMenuEnabled()?View.VISIBLE:View.GONE);
+            }
         }
         mPreviewMenu = basic;
     }
@@ -1025,6 +1040,7 @@ public class PhotoMenu extends MenuController
 
     public void onListMenuTouched() {
         mUI.removeLevel2();
+        mPopupStatus = POPUP_FIRST_LEVEL;
     }
 
     public void closeAllView() {
@@ -1141,6 +1157,29 @@ public class PhotoMenu extends MenuController
                         mActivity.getString(R.string.pref_camera_advanced_feature_default));
             }
         }
+
+        String optizoomOn = mActivity.getString(R.string
+                .pref_camera_advanced_feature_value_optizoom_on);
+        if (notSame(pref, CameraSettings.KEY_SCENE_MODE, optizoomOn)) {
+            ListPreference lp = mPreferenceGroup
+                    .findPreference(CameraSettings.KEY_ADVANCED_FEATURES);
+            if (lp != null && optizoomOn.equals(lp.getValue())) {
+                setPreference(CameraSettings.KEY_ADVANCED_FEATURES,
+                        mActivity.getString(R.string.pref_camera_advanced_feature_default));
+            }
+        }
+
+        String chromaFlashOn = mActivity.getString(R.string
+                .pref_camera_advanced_feature_value_chromaflash_on);
+        if (notSame(pref, CameraSettings.KEY_SCENE_MODE, chromaFlashOn)) {
+            ListPreference lp = mPreferenceGroup
+                    .findPreference(CameraSettings.KEY_ADVANCED_FEATURES);
+            if (lp != null && chromaFlashOn.equals(lp.getValue())) {
+                setPreference(CameraSettings.KEY_ADVANCED_FEATURES,
+                        mActivity.getString(R.string.pref_camera_advanced_feature_default));
+            }
+        }
+
         updateFilterModeIcon(pref, pref);
         super.onSettingChanged(pref);
     }

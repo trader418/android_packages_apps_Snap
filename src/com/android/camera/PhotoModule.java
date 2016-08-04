@@ -19,7 +19,6 @@ package com.android.camera;
 
 import android.annotation.TargetApi;
 import android.app.Activity;
-import android.content.ContentProviderClient;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -93,6 +92,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Vector;
 import java.util.HashMap;
@@ -198,7 +198,6 @@ public class PhotoModule
 
     private static final String sTempCropFilename = "crop-temp";
 
-    private ContentProviderClient mMediaProviderClient;
     private boolean mFaceDetectionStarted = false;
 
     private static final String PERSIST_LONG_ENABLE = "persist.camera.longshot.enable";
@@ -370,12 +369,53 @@ public class PhotoModule
     }
     private SelfieThread selfieThread;
 
+    private class MediaSaveNotifyThread extends Thread
+    {
+        private Uri uri;
+        public MediaSaveNotifyThread(Uri uri)
+        {
+            this.uri = uri;
+        }
+        public void setUri(Uri uri)
+        {
+            this.uri = uri;
+        }
+        public void run()
+        {
+            while(mLongshotActive) {
+                try {
+                    Thread.sleep(10);
+                } catch(InterruptedException e) {
+                }
+            }
+            mActivity.runOnUiThread(new Runnable() {
+                public void run() {
+                    if (uri != null)
+                        mActivity.notifyNewMedia(uri);
+                    mActivity.updateStorageSpaceAndHint();
+                    updateRemainingPhotos();
+                }
+            });
+            mediaSaveNotifyThread = null;
+        }
+    }
+
+    private MediaSaveNotifyThread mediaSaveNotifyThread;
     private MediaSaveService.OnMediaSavedListener mOnMediaSavedListener =
             new MediaSaveService.OnMediaSavedListener() {
                 @Override
                 public void onMediaSaved(Uri uri) {
-                    if (uri != null) {
-                        mActivity.notifyNewMedia(uri);
+                    if(mLongshotActive) {
+                        if(mediaSaveNotifyThread == null) {
+                            mediaSaveNotifyThread = new MediaSaveNotifyThread(uri);
+                            mediaSaveNotifyThread.start();
+                        }
+                        else
+                            mediaSaveNotifyThread.setUri(uri);
+                    } else {
+                        if (uri != null) {
+                            mActivity.notifyNewMedia(uri);
+                        }
                     }
                 }
             };
@@ -817,19 +857,15 @@ public class PhotoModule
 
     @Override
     public void onSwitchSavePath() {
-        mUI.setPreference(CameraSettings.KEY_CAMERA_SAVEPATH, "1");
+        if (mUI.mMenuInitialized) {
+            mUI.setPreference(CameraSettings.KEY_CAMERA_SAVEPATH, "1");
+        } else {
+            mPreferences.edit()
+                    .putString(CameraSettings.KEY_CAMERA_SAVEPATH, "1")
+                    .apply();
+        }
         RotateTextToast.makeText(mActivity, R.string.on_switch_save_path_to_sdcard,
                 Toast.LENGTH_SHORT).show();
-    }
-
-    private void keepMediaProviderInstance() {
-        // We want to keep a reference to MediaProvider in camera's lifecycle.
-        // TODO: Utilize mMediaProviderClient instance to replace
-        // ContentResolver calls.
-        if (mMediaProviderClient == null) {
-            mMediaProviderClient = mContentResolver
-                    .acquireContentProviderClient(MediaStore.AUTHORITY);
-        }
     }
 
     // Snapshots can only be taken after this is called. It should be called
@@ -844,8 +880,6 @@ public class PhotoModule
         boolean recordLocation = RecordLocationPreference.get(
                 mPreferences, mContentResolver);
         mLocationManager.recordLocation(recordLocation);
-
-        keepMediaProviderInstance();
 
         mUI.initializeFirstTime();
         MediaSaveService s = mActivity.getMediaSaveService();
@@ -879,7 +913,6 @@ public class PhotoModule
             mUI.showSwitcher();
         }
         mUI.initializeSecondTime(mParameters);
-        keepMediaProviderInstance();
     }
 
     private void showTapToFocusToastIfNeeded() {
@@ -1083,6 +1116,11 @@ public class PhotoModule
             if (data.length >= 12) {
                 for (int i =0;i<3;i++) {
                     metadata[i] = byteToInt( (byte []) data, i*4);
+                }
+                if (metadata[0] != 3) {
+                    Log.d(TAG, "Unhandled metadata callback: [" +
+                            Arrays.toString(metadata) + "]");
+                    return;
                 }
                 final boolean autoHdrEnabled = metadata[2] == 1;
                 mActivity.runOnUiThread(new Runnable() {
@@ -1413,11 +1451,8 @@ public class PhotoModule
                             onCaptureDone();
                         }
                     }
-                    // Check this in advance of each shot so we don't add to shutter
-                    // latency. It's true that someone else could write to the SD card in
-                    // the mean time and fill it, but that could have happened between the
-                    // shutter press and saving the JPEG too.
-                    mActivity.updateStorageSpaceAndHint();
+                    if(!mLongshotActive)
+                        mActivity.updateStorageSpaceAndHint();
                     mUI.updateRemainingPhotos(--mRemainingPhotos);
                     long now = System.currentTimeMillis();
                     mJpegCallbackFinishTime = now - mJpegPictureCallbackTime;
@@ -1719,6 +1754,25 @@ public class PhotoModule
         }
     }
 
+    private void updateLongshotScene() {
+        String[] longshotScenes = mActivity.getResources().getStringArray(
+                R.array.longshot_scenemodes);
+        if (longshotScenes.length == 0) {
+            mUI.overrideSettings(CameraSettings.KEY_LONGSHOT, null);
+            return;
+        }
+        boolean useLongshot = false;
+        for (String scene : longshotScenes) {
+            if (scene.equals(mSceneMode)) {
+                useLongshot = true;
+                break;
+            }
+        }
+        mUI.overrideSettings(CameraSettings.KEY_LONGSHOT,
+                useLongshot ? mActivity.getString(R.string.setting_on_value) :
+                              mActivity.getString(R.string.setting_off_value));
+    }
+
     private void updateCommonManual3ASettings() {
         mSceneMode = Parameters.SCENE_MODE_AUTO;
         String flashMode = Parameters.FLASH_MODE_OFF;
@@ -1808,6 +1862,10 @@ public class PhotoModule
             mParameters.get(CameraSettings.KEY_QC_TP);
         String multiTouchFocus =
             mParameters.get(CameraSettings.KEY_QC_MULTI_TOUCH_FOCUS);
+        String stillMoreOn = mActivity.getString(R.string.
+            pref_camera_advanced_feature_value_stillmore_on);
+        String stillMore =
+            mParameters.get(CameraSettings.KEY_QC_STILL_MORE);
         String continuousShot =
                 mParameters.get("long-shot");
 
@@ -1832,8 +1890,15 @@ public class PhotoModule
                 (chromaFlash != null && chromaFlash.equals(chromaFlashOn)) ||
                 (optiZoom != null && optiZoom.equals(optiZoomOn)) ||
                 (fssr != null && fssr.equals(fssrOn)) ||
-                (truePortrait != null && truePortrait.equals(truPortraitOn))) {
-            mSceneMode = sceneMode = Parameters.SCENE_MODE_AUTO;
+                (truePortrait != null && truePortrait.equals(truPortraitOn)) ||
+                (stillMore != null && stillMore.equals(stillMoreOn))) {
+            if ((optiZoom != null && optiZoom.equals(optiZoomOn)) ||
+                    (CameraSettings.hasChromaFlashScene(mActivity) &&
+                     chromaFlash != null && chromaFlash.equals(chromaFlashOn))) {
+                sceneMode = null;
+            } else {
+                mSceneMode = sceneMode = Parameters.SCENE_MODE_AUTO;
+            }
             flashMode = Parameters.FLASH_MODE_OFF;
             focusMode = Parameters.FOCUS_MODE_INFINITY;
             redeyeReduction = mActivity.getString(R.string.
@@ -1849,27 +1914,28 @@ public class PhotoModule
                                    null, null, null, colorEffect,
                                    sceneMode, redeyeReduction, aeBracketing);
             disableLongShot = true;
-            RotateTextToast.makeText(mActivity, R.string.advanced_capture_disable_continuous_shot,
-                    Toast.LENGTH_LONG).show();
         }
 
         // If scene mode is set, for white balance and focus mode
         // read settings from preferences so we retain user preferences.
-        if (!Parameters.SCENE_MODE_AUTO.equals(mSceneMode)) {
+        if (!Parameters.SCENE_MODE_AUTO.equals(mSceneMode) &&
+                !"asd".equals(mSceneMode) &&
+                !"sports".equals(mSceneMode)) {
             flashMode = mParameters.FLASH_MODE_OFF;
             String whiteBalance = Parameters.WHITE_BALANCE_AUTO;
             focusMode = mFocusManager.getFocusMode(false);
             colorEffect = mParameters.getColorEffect();
             String defaultEffect = mActivity.getString(R.string.pref_camera_coloreffect_default);
-            if (CameraUtil.SCENE_MODE_HDR.equals(mSceneMode)
-                    && colorEffect != null & !colorEffect.equals(defaultEffect)) {
+            if (CameraUtil.SCENE_MODE_HDR.equals(mSceneMode)) {
                 disableLongShot = true;
-                // Change the colorEffect to default(None effect) when HDR ON.
-                colorEffect = defaultEffect;
-                mUI.setPreference(CameraSettings.KEY_COLOR_EFFECT, colorEffect);
-                mParameters.setColorEffect(colorEffect);
-                mCameraDevice.setParameters(mParameters);
-                mParameters = mCameraDevice.getParameters();
+                if (colorEffect != null & !colorEffect.equals(defaultEffect)) {
+                    // Change the colorEffect to default(None effect) when HDR ON.
+                    colorEffect = defaultEffect;
+                    mUI.setPreference(CameraSettings.KEY_COLOR_EFFECT, colorEffect);
+                    mParameters.setColorEffect(colorEffect);
+                    mCameraDevice.setParameters(mParameters);
+                    mParameters = mCameraDevice.getParameters();
+                }
             }
             exposureCompensation =
                 Integer.toString(mParameters.getExposureCompensation());
@@ -1904,11 +1970,17 @@ public class PhotoModule
             flashMode = Parameters.FLASH_MODE_OFF;
             mParameters.setFlashMode(flashMode);
         }
+
+        if (chromaFlash != null && chromaFlash.equals(chromaFlashOn)) {
+            flashMode = Parameters.FLASH_MODE_ON;
+            mParameters.setFlashMode(flashMode);
+        }
+
         if (disableLongShot) {
             mUI.overrideSettings(CameraSettings.KEY_LONGSHOT,
                     mActivity.getString(R.string.setting_off_value));
         } else {
-            mUI.overrideSettings(CameraSettings.KEY_LONGSHOT, null);
+            updateLongshotScene();
         }
 
         if (flashMode == null) {
@@ -2006,6 +2078,7 @@ public class PhotoModule
                 setFlipValue();
                 mCameraDevice.setParameters(mParameters);
             }
+            mUI.tryToCloseSubList();
             mUI.setOrientation(mOrientation, true);
         }
 
@@ -2017,12 +2090,7 @@ public class PhotoModule
     }
 
     @Override
-    public void onStop() {
-        if (mMediaProviderClient != null) {
-            mMediaProviderClient.release();
-            mMediaProviderClient = null;
-        }
-    }
+    public void onStop() {}
 
     @Override
     public void onCaptureCancelled() {
@@ -2264,6 +2332,10 @@ public class PhotoModule
                 boolean enable = SystemProperties.getBoolean(PERSIST_LONG_SAVE, false);
                 mLongshotSave = enable;
 
+                //Cancel the previous countdown when long press shutter button for longshot.
+                if (mUI.isCountingDown()) {
+                    mUI.cancelCountDown();
+                }
                 //check whether current memory is enough for longshot.
                 if(isLongshotNeedCancel()) {
                     return;
@@ -2313,7 +2385,11 @@ public class PhotoModule
         mParameters = mCameraDevice.getParameters();
         mCameraPreviewParamsReady = true;
         mInitialParams = mParameters;
-        if (mFocusManager == null) initializeFocusManager();
+        if (mFocusManager == null) {
+            initializeFocusManager();
+        } else {
+            mFocusManager.setParameters(mInitialParams);
+        }
         initializeCapabilities();
         mHandler.sendEmptyMessageDelayed(CAMERA_OPEN_DONE,100);
         return;
@@ -2321,6 +2397,8 @@ public class PhotoModule
 
     @Override
     public void onResumeAfterSuper() {
+        mLastPhotoTakenWithRefocus = false;
+        mUI.showSurfaceView();
         // Add delay on resume from lock screen only, in order to to speed up
         // the onResume --> onPause --> onResume cycle from lock screen.
         // Don't do always because letting go of thread can cause delay.
@@ -2428,6 +2506,7 @@ public class PhotoModule
     public void onPauseAfterSuper() {
         Log.v(TAG, "On pause.");
         mUI.showPreviewCover();
+        mUI.hideSurfaceView();
 
         try {
             if (mOpenCameraThread != null) {
@@ -2765,6 +2844,10 @@ public class PhotoModule
             mFocusManager.setAeAwbLock(false); // Unlock AE and AWB.
         }
 
+        if (!mSnapshotOnIdle) {
+            mFocusManager.setAeAwbLock(false); // Unlock AE and AWB.
+        }
+
         setCameraParameters(UPDATE_PARAM_ALL);
 
         mCameraDevice.startPreview();
@@ -2863,7 +2946,8 @@ public class PhotoModule
                                             String optiZoom,
                                             String fssr,
                                             String truePortrait,
-                                            String multiTouchFocus) {
+                                            String multiTouchFocus,
+                                            String stillMore) {
         if (CameraUtil.isSupported(ubiFocus,
               CameraSettings.getSupportedAFBracketingModes(mParameters))) {
             mParameters.set(CameraSettings.KEY_QC_AF_BRACKETING, ubiFocus);
@@ -2891,6 +2975,10 @@ public class PhotoModule
         if(CameraUtil.isSupported(multiTouchFocus,
               CameraSettings.getSupportedMultiTouchFocusModes(mParameters))) {
             mParameters.set(CameraSettings.KEY_QC_MULTI_TOUCH_FOCUS, multiTouchFocus);
+        }
+        if (CameraUtil.isSupported(stillMore,
+              CameraSettings.getSupportedStillMoreModes(mParameters))) {
+            mParameters.set(CameraSettings.KEY_QC_STILL_MORE, stillMore);
         }
     }
 
@@ -2934,6 +3022,12 @@ public class PhotoModule
                 CameraSettings.KEY_LONGSHOT,
                 mActivity.getString(R.string.pref_camera_longshot_default));
         mParameters.set("long-shot", longshot_enable);
+
+        // Set Touch AF/AEC parameter.
+        if (CameraUtil.isSupported(mParameters.TOUCH_AF_AEC_ON,
+                mParameters.getSupportedTouchAfAec())) {
+            mParameters.setTouchAfAec(mParameters.TOUCH_AF_AEC_ON);
+        }
 
         // Set Picture Format
         // Picture Formats specified in UI should be consistent with
@@ -3159,6 +3253,8 @@ public class PhotoModule
                  pref_camera_advanced_feature_value_trueportrait_off);
              String multiTouchFocusOff = mActivity.getString(R.string.
                  pref_camera_advanced_feature_value_multi_touch_focus_off);
+             String stillMoreOff = mActivity.getString(R.string.
+                 pref_camera_advanced_feature_value_stillmore_off);
 
              if (advancedFeature.equals(mActivity.getString(R.string.
                  pref_camera_advanced_feature_value_ubifocus_on))) {
@@ -3168,7 +3264,8 @@ public class PhotoModule
                                            optiZoomOff,
                                            fssrOff,
                                            truePortraitOff,
-                                           multiTouchFocusOff);
+                                           multiTouchFocusOff,
+                                           stillMoreOff);
             } else if (advancedFeature.equals(mActivity.getString(R.string.
                  pref_camera_advanced_feature_value_chromaflash_on))) {
                  qcomUpdateAdvancedFeatures(ubiFocusOff,
@@ -3177,7 +3274,8 @@ public class PhotoModule
                                            optiZoomOff,
                                            fssrOff,
                                            truePortraitOff,
-                                           multiTouchFocusOff);
+                                           multiTouchFocusOff,
+                                           stillMoreOff);
             } else if (advancedFeature.equals(mActivity.getString(R.string.
                  pref_camera_advanced_feature_value_refocus_on))) {
                  qcomUpdateAdvancedFeatures(ubiFocusOff,
@@ -3186,7 +3284,8 @@ public class PhotoModule
                                            optiZoomOff,
                                            fssrOff,
                                            truePortraitOff,
-                                           multiTouchFocusOff);
+                                           multiTouchFocusOff,
+                                           stillMoreOff);
                  mRefocus = true;
             } else if (advancedFeature.equals(mActivity.getString(R.string.
                 pref_camera_advanced_feature_value_optizoom_on))) {
@@ -3196,7 +3295,8 @@ public class PhotoModule
                                            advancedFeature,
                                            fssrOff,
                                            truePortraitOff,
-                                           multiTouchFocusOff);
+                                           multiTouchFocusOff,
+                                           stillMoreOff);
             } else if (advancedFeature.equals(mActivity.getString(R.string.
                 pref_camera_advanced_feature_value_FSSR_on))) {
                  qcomUpdateAdvancedFeatures(ubiFocusOff,
@@ -3205,7 +3305,8 @@ public class PhotoModule
                                            optiZoomOff,
                                            advancedFeature,
                                            truePortraitOff,
-                                           multiTouchFocusOff);
+                                           multiTouchFocusOff,
+                                           stillMoreOff);
             } else if (advancedFeature.equals(mActivity.getString(R.string.
                 pref_camera_advanced_feature_value_trueportrait_on))) {
                 qcomUpdateAdvancedFeatures(ubiFocusOff,
@@ -3214,7 +3315,8 @@ public class PhotoModule
                                            optiZoomOff,
                                            fssrOff,
                                            advancedFeature,
-                                           multiTouchFocusOff);
+                                           multiTouchFocusOff,
+                                           stillMoreOff);
             } else if (advancedFeature.equals(mActivity.getString(R.string.
                 pref_camera_advanced_feature_value_multi_touch_focus_on))) {
                 qcomUpdateAdvancedFeatures(ubiFocusOff,
@@ -3223,6 +3325,17 @@ public class PhotoModule
                                            optiZoomOff,
                                            fssrOff,
                                            truePortraitOff,
+                                           advancedFeature,
+                                           stillMoreOff);
+            } else if (advancedFeature.equals(mActivity.getString(R.string.
+                pref_camera_advanced_feature_value_stillmore_on))) {
+                qcomUpdateAdvancedFeatures(ubiFocusOff,
+                                           chromaFlashOff,
+                                           reFocusOff,
+                                           optiZoomOff,
+                                           fssrOff,
+                                           truePortraitOff,
+                                           multiTouchFocusOff,
                                            advancedFeature);
             } else {
                 qcomUpdateAdvancedFeatures(ubiFocusOff,
@@ -3231,9 +3344,55 @@ public class PhotoModule
                                            optiZoomOff,
                                            fssrOff,
                                            truePortraitOff,
-                                           multiTouchFocusOff);
+                                           multiTouchFocusOff,
+                                           stillMoreOff);
             }
         }
+
+        if (mActivity.getString(R.string.pref_camera_advanced_feature_value_trueportrait_on)
+                .equals(advancedFeature)) {
+            // face detection must always be on for truePortrait
+            if (CameraUtil.isSupported(Parameters.FACE_DETECTION_ON, mParameters.getSupportedFaceDetectionModes())) {
+                mActivity.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        mUI.overrideSettings(CameraSettings.KEY_FACE_DETECTION, Parameters.FACE_DETECTION_ON);
+                    }
+                });
+
+                mParameters.setFaceDetectionMode(Parameters.FACE_DETECTION_ON);
+                if(mFaceDetectionEnabled == false) {
+                    mFaceDetectionEnabled = true;
+                    startFaceDetection();
+                }
+            }
+        } else {
+            // Set face detetction parameter.
+            // clear override to re-enable setting if true portrait is off.
+            mActivity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    mUI.overrideSettings(CameraSettings.KEY_FACE_DETECTION, null);
+                }
+            });
+
+            String faceDetection = mPreferences.getString(
+                CameraSettings.KEY_FACE_DETECTION,
+                mActivity.getString(R.string.pref_camera_facedetection_default));
+
+            if (CameraUtil.isSupported(faceDetection, mParameters.getSupportedFaceDetectionModes())) {
+                mParameters.setFaceDetectionMode(faceDetection);
+                if(faceDetection.equals("on") && mFaceDetectionEnabled == false) {
+                    mFaceDetectionEnabled = true;
+                    startFaceDetection();
+                }
+                if(faceDetection.equals("off") && mFaceDetectionEnabled == true) {
+                    stopFaceDetection();
+                    mFaceDetectionEnabled = false;
+                }
+            }
+        }
+
         // Set auto exposure parameter.
         String autoExposure = mPreferences.getString(
                 CameraSettings.KEY_AUTOEXPOSURE,
@@ -3254,15 +3413,6 @@ public class PhotoModule
 
         String zsl = mPreferences.getString(CameraSettings.KEY_ZSL,
                                   mActivity.getString(R.string.pref_camera_zsl_default));
-        String auto_hdr = mPreferences.getString(CameraSettings.KEY_AUTO_HDR,
-                                       mActivity.getString(R.string.pref_camera_auto_hdr_default));
-        if (CameraUtil.isAutoHDRSupported(mParameters)) {
-            mParameters.set("auto-hdr-enable",auto_hdr);
-            if (auto_hdr.equals("enable")) {
-                mParameters.setSceneMode("asd");
-                mCameraDevice.setMetadataCb(mMetaDataCallback);
-            }
-        }
         mParameters.setZSLMode(zsl);
         if(zsl.equals("on")) {
             //Switch on ZSL Camera mode
@@ -3310,22 +3460,8 @@ public class PhotoModule
                 mParameters.setFocusMode(mFocusManager.getFocusMode(false));
             }
         }
-        // Set face detetction parameter.
-        String faceDetection = mPreferences.getString(
-            CameraSettings.KEY_FACE_DETECTION,
-            mActivity.getString(R.string.pref_camera_facedetection_default));
 
-        if (CameraUtil.isSupported(faceDetection, mParameters.getSupportedFaceDetectionModes())) {
-            mParameters.setFaceDetectionMode(faceDetection);
-            if(faceDetection.equals("on") && mFaceDetectionEnabled == false) {
-                mFaceDetectionEnabled = true;
-                startFaceDetection();
-            }
-            if(faceDetection.equals("off") && mFaceDetectionEnabled == true) {
-                stopFaceDetection();
-                mFaceDetectionEnabled = false;
-            }
-        }
+        updateAutoHDR();
 
         //Set Histogram
         String histogram = mPreferences.getString(
@@ -3373,6 +3509,28 @@ public class PhotoModule
             return 0;
         } else {
             return size.width * size.height * 3 / ratio;
+        }
+    }
+
+    private void updateAutoHDR() {
+        String autoHdr = mPreferences.getString(CameraSettings.KEY_AUTO_HDR,
+                mActivity.getString(R.string.pref_camera_auto_hdr_default));
+        String advancedFeature = mPreferences.getString(
+                CameraSettings.KEY_ADVANCED_FEATURES,
+                mActivity.getString(R.string.pref_camera_advanced_feature_default));
+
+        if (CameraUtil.isAutoHDRSupported(mParameters)) {
+            if (autoHdr.equals("enable") && 
+                    ("asd".equals(mSceneMode) || "auto".equals(mSceneMode)) &&
+                    CameraUtil.isSupported("asd", mParameters.getSupportedSceneModes()) &&
+                    (advancedFeature == null || "none".equals(advancedFeature))) {
+                mParameters.setSceneMode(Parameters.SCENE_MODE_ASD);
+                mCameraDevice.setMetadataCb(mMetaDataCallback);
+                mParameters.set("auto-hdr-enable", "enable");
+                return;
+            }
+            mCameraDevice.setMetadataCb(null);
+            mParameters.set("auto-hdr-enable", "disable");
         }
     }
 
@@ -3582,6 +3740,10 @@ public class PhotoModule
 
         String refocusOn = mActivity.getString(R.string
                 .pref_camera_advanced_feature_value_refocus_on);
+        String optizoomOn = mActivity.getString(R.string
+                .pref_camera_advanced_feature_value_optizoom_on);
+        String chromaFlashOn = mActivity.getString(R.string
+                .pref_camera_advanced_feature_value_chromaflash_on);
 
         if (CameraUtil.isSupported(mSceneMode, mParameters.getSupportedSceneModes())) {
             if (!mParameters.getSceneMode().equals(mSceneMode)) {
@@ -3597,6 +3759,17 @@ public class PhotoModule
             if (refocusOn.equals(mSceneMode)) {
                 try {
                     mUI.setPreference(CameraSettings.KEY_ADVANCED_FEATURES, refocusOn);
+                } catch (NullPointerException e) {
+                }
+            } else if (optizoomOn.equals(mSceneMode)) {
+                try {
+                    mUI.setPreference(CameraSettings.KEY_ADVANCED_FEATURES, optizoomOn);
+                } catch (NullPointerException e) {
+                }
+            } else if (chromaFlashOn.equals(mSceneMode)) {
+                try {
+                    mUI.setPreference(CameraSettings.KEY_ADVANCED_FEATURES, chromaFlashOn);
+                    mParameters.setSceneMode(Parameters.SCENE_MODE_AUTO);
                 } catch (NullPointerException e) {
                 }
             } else {
@@ -3633,7 +3806,9 @@ public class PhotoModule
             Log.w(TAG, "invalid exposure range: " + value);
         }
 
-        if (Parameters.SCENE_MODE_AUTO.equals(mSceneMode)) {
+        if (Parameters.SCENE_MODE_AUTO.equals(mSceneMode) ||
+                "asd".equals(mSceneMode) ||
+                "sports".equals(mSceneMode)) {
             // Set flash mode.
             String flashMode;
             if (mSavedFlashMode == null) {
@@ -3683,9 +3858,11 @@ public class PhotoModule
                     mActivity.getString(R.string.pref_camera_focustime_default))));
         } else {
             mFocusManager.overrideFocusMode(mParameters.getFocusMode());
-            if (CameraUtil.isSupported(Parameters.FLASH_MODE_OFF,
+            String flashMode = chromaFlashOn.equals(mSceneMode) ?
+                    Parameters.FLASH_MODE_ON : Parameters.FLASH_MODE_OFF;
+            if (CameraUtil.isSupported(flashMode,
                     mParameters.getSupportedFlashModes())) {
-                mParameters.setFlashMode(Parameters.FLASH_MODE_OFF);
+                mParameters.setFlashMode(flashMode);
             }
             if (CameraUtil.isSupported(Parameters.WHITE_BALANCE_AUTO,
                     mParameters.getSupportedWhiteBalance())) {
@@ -4313,6 +4490,11 @@ public class PhotoModule
                     mPreferences.getString(CameraSettings.KEY_CAMERA_SAVEPATH, "0").equals("1"));
             mActivity.updateStorageSpaceAndHint();
             updateRemainingPhotos();
+        }
+
+        if (!CameraSettings.hasChromaFlashScene(mActivity) &&
+                CameraSettings.KEY_QC_CHROMA_FLASH.equals(pref.getKey())) {
+            mUI.setPreference(CameraSettings.KEY_ADVANCED_FEATURES, pref.getValue());
         }
 
         //call generic onSharedPreferenceChanged
