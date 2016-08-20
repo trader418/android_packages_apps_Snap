@@ -110,6 +110,7 @@ public class PhotoModule
         ShutterButton.OnShutterButtonListener,
         MediaSaveService.Listener,
         OnCountDownFinishedListener,
+        LocationManager.Listener,
         SensorEventListener {
 
     private static final String TAG = "CAM_PhotoModule";
@@ -571,7 +572,7 @@ public class PhotoModule
         mUI = new PhotoUI(activity, this, parent);
         initializeControlByIntent();
         mQuickCapture = mActivity.getIntent().getBooleanExtra(EXTRA_QUICK_CAPTURE, false);
-        mLocationManager = new LocationManager(mActivity, mUI);
+        mLocationManager = new LocationManager(mActivity, this);
         mSensorManager = (SensorManager)(mActivity.getSystemService(Context.SENSOR_SERVICE));
 
         Storage.setSaveSDCard(
@@ -620,13 +621,23 @@ public class PhotoModule
         }
 
         mLocationPromptTriggered = true;
-        mUI.showLocationDialog();
+
+        /* Enable the location at the begining, always.
+           If the user denies the permission, it will be disabled
+           right away due to exception */
+        enableRecordingLocation(true);
+    }
+
+    @Override
+    public void waitingLocationPermissionResult(boolean result) {
+        mLocationManager.waitingLocationPermissionResult(result);
     }
 
     @Override
     public void enableRecordingLocation(boolean enable) {
         setLocationPreference(enable ? RecordLocationPreference.VALUE_ON
                 : RecordLocationPreference.VALUE_OFF);
+        mLocationManager.recordLocation(enable);
     }
 
     @Override
@@ -672,7 +683,9 @@ public class PhotoModule
                 .apply();
         // TODO: Fix this to use the actual onSharedPreferencesChanged listener
         // instead of invoking manually
-        onSharedPreferenceChanged();
+        if (mUI.mMenuInitialized) {
+            onSharedPreferenceChanged();
+        }
     }
 
     private void onCameraOpened() {
@@ -688,6 +701,7 @@ public class PhotoModule
     private void switchCamera() {
         if (mPaused) return;
 
+        mUI.applySurfaceChange(PhotoUI.SURFACE_STATUS.HIDE);
         Log.v(TAG, "Start to switch camera. id=" + mPendingSwitchCameraId);
         mCameraId = mPendingSwitchCameraId;
         mPendingSwitchCameraId = -1;
@@ -735,6 +749,7 @@ public class PhotoModule
         mFocusManager.setParameters(mInitialParams);
         setupPreview();
 
+        mUI.applySurfaceChange(PhotoUI.SURFACE_STATUS.SURFACE_VIEW);
         // reset zoom value index
         mZoomValue = 0;
         resizeForPreviewAspectRatio();
@@ -1236,6 +1251,11 @@ public class PhotoModule
             if (mCameraState != LONGSHOT) {
                 mUI.stopSelfieFlash();
                 mUI.enableShutter(true);
+            }
+            if (mUI.isPreviewCoverVisible()) {
+                 // When take picture request is sent before starting preview, onPreviewFrame()
+                 // callback doesn't happen so removing preview cover here, instead.
+                 mUI.hidePreviewCover();
             }
             if (mPaused) {
                 return;
@@ -1889,12 +1909,14 @@ public class PhotoModule
         if ((multiTouchFocus != null && multiTouchFocus.equals(multiTouchFocusOn)) ||
                 (chromaFlash != null && chromaFlash.equals(chromaFlashOn)) ||
                 (optiZoom != null && optiZoom.equals(optiZoomOn)) ||
+                (reFocus != null && reFocus.equals(reFocusOn)) ||
                 (fssr != null && fssr.equals(fssrOn)) ||
                 (truePortrait != null && truePortrait.equals(truPortraitOn)) ||
                 (stillMore != null && stillMore.equals(stillMoreOn))) {
             if ((optiZoom != null && optiZoom.equals(optiZoomOn)) ||
                     (CameraSettings.hasChromaFlashScene(mActivity) &&
-                     chromaFlash != null && chromaFlash.equals(chromaFlashOn))) {
+                     chromaFlash != null && chromaFlash.equals(chromaFlashOn)) ||
+                 (reFocus != null && reFocus.equals(reFocusOn))) {
                 sceneMode = null;
             } else {
                 mSceneMode = sceneMode = Parameters.SCENE_MODE_AUTO;
@@ -2447,6 +2469,8 @@ public class PhotoModule
             mOpenCameraThread.start();
         }
 
+        mUI.applySurfaceChange(PhotoUI.SURFACE_STATUS.SURFACE_VIEW);
+
         mJpegPictureCallbackTime = 0;
         mZoomValue = 0;
 
@@ -2483,6 +2507,8 @@ public class PhotoModule
     @Override
     public void onPauseBeforeSuper() {
         mPaused = true;
+        mUI.applySurfaceChange(PhotoUI.SURFACE_STATUS.HIDE);
+
         Sensor gsensor = mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         if (gsensor != null) {
             mSensorManager.unregisterListener(this, gsensor);
@@ -4718,5 +4744,10 @@ public class PhotoModule
     public boolean isLongshotDone() {
         return ((mCameraState == LONGSHOT) && (mLongshotSnapNum == mReceivedSnapNum) &&
                 !mLongshotActive);
+    }
+
+    @Override
+    public void onErrorListener(int error) {
+        enableRecordingLocation(false);
     }
 }

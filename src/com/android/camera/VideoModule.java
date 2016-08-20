@@ -85,6 +85,7 @@ public class VideoModule implements CameraModule,
     FocusOverlayManager.Listener,
     CameraPreference.OnPreferenceChangedListener,
     ShutterButton.OnShutterButtonListener,
+    LocationManager.Listener,
     MediaRecorder.OnErrorListener,
     MediaRecorder.OnInfoListener {
 
@@ -497,7 +498,7 @@ public class VideoModule implements CameraModule,
         mUI.setPrefChangedListener(this);
 
         mQuickCapture = mActivity.getIntent().getBooleanExtra(EXTRA_QUICK_CAPTURE, false);
-        mLocationManager = new LocationManager(mActivity, null);
+        mLocationManager = new LocationManager(mActivity, this);
 
         mUI.setOrientationIndicator(0, false);
         setDisplayOrientation();
@@ -563,6 +564,23 @@ public class VideoModule implements CameraModule,
             mCameraDevice.setParameters(mParameters);
         }
     }
+
+    @Override
+    public void waitingLocationPermissionResult(boolean result) {
+        mLocationManager.waitingLocationPermissionResult(result);
+    }
+
+    @Override
+    public void enableRecordingLocation(boolean enable) {
+        String value = (enable ? RecordLocationPreference.VALUE_ON
+                        : RecordLocationPreference.VALUE_OFF);
+        if (mPreferences != null) {
+            mPreferences.edit()
+                .putString(CameraSettings.KEY_RECORD_LOCATION, value)
+                .apply();
+        }
+        mLocationManager.recordLocation(enable);
+     }
 
     // SingleTapListener
     // Preview area is touched. Take a picture.
@@ -1154,6 +1172,8 @@ public class VideoModule implements CameraModule,
             mUI.enableShutter(true);
         }
 
+        mUI.applySurfaceChange(VideoUI.SURFACE_STATUS.SURFACE_VIEW);
+
         mUI.initDisplayChangeListener();
         // Initializing it here after the preview is started.
         mUI.initializeZoom(mParameters);
@@ -1338,6 +1358,7 @@ public class VideoModule implements CameraModule,
 
         mUI.collapseCameraControls();
         mUI.removeDisplayChangeListener();
+        mUI.applySurfaceChange(VideoUI.SURFACE_STATUS.HIDE);
     }
 
     @Override
@@ -1874,7 +1895,11 @@ public class VideoModule implements CameraModule,
         mUI.cancelAnimations();
         mUI.setSwipingEnabled(false);
         mUI.hideUIwhileRecording();
-
+        // When recording request is sent before starting preview, onPreviewFrame()
+        // callback doesn't happen so removing preview cover here, instead.
+        if (mUI.isPreviewCoverVisible()) {
+            mUI.hidePreviewCover();
+        }
         mActivity.updateStorageSpaceAndHint();
         if (mActivity.getStorageSpaceBytes() <= Storage.LOW_STORAGE_THRESHOLD_BYTES) {
             Log.v(TAG, "Storage issue, ignore the start request");
@@ -2763,6 +2788,7 @@ public class VideoModule implements CameraModule,
         }
 
         Log.d(TAG, "Start to switch camera.");
+        mUI.applySurfaceChange(VideoUI.SURFACE_STATUS.HIDE);
         mCameraId = mPendingSwitchCameraId;
         mPendingSwitchCameraId = -1;
         setCameraId(mCameraId);
@@ -2782,6 +2808,7 @@ public class VideoModule implements CameraModule,
         mFocusManager.setParameters(mParameters);
 
         readVideoPreferences();
+        mUI.applySurfaceChange(VideoUI.SURFACE_STATUS.SURFACE_VIEW);
         startPreview();
         initializeVideoSnapshot();
         resizeForPreviewAspectRatio();
@@ -3006,4 +3033,10 @@ public class VideoModule implements CameraModule,
         resumeVideoRecording();
     }
 
+    @Override
+    public void onErrorListener(int error) {
+        enableRecordingLocation(false);
+    }
+
 }
+
