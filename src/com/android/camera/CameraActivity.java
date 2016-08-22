@@ -1719,7 +1719,7 @@ public class CameraActivity extends Activity
                         PackageManager.PERMISSION_GRANTED &&
                 checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
                         PackageManager.PERMISSION_GRANTED &&
-                checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
                         PackageManager.PERMISSION_GRANTED) {
             mHasCriticalPermissions = true;
         } else {
@@ -1812,14 +1812,14 @@ public class CameraActivity extends Activity
             mWakeLock.release();
             Log.d(TAG, "wake lock release");
         }
-        if (mSecureCamera) {
-            unregisterReceiver(mScreenOffReceiver);
-        }
-        getContentResolver().unregisterContentObserver(mLocalImagesObserver);
-        getContentResolver().unregisterContentObserver(mLocalVideosObserver);
-        unregisterReceiver(mSDcardMountedReceiver);
-
         if (mCursor != null) {
+            if (mSecureCamera) {
+                unregisterReceiver(mScreenOffReceiver);
+            }
+            getContentResolver().unregisterContentObserver(mLocalImagesObserver);
+            getContentResolver().unregisterContentObserver(mLocalVideosObserver);
+            unregisterReceiver(mSDcardMountedReceiver);
+
             mCursor.close();
             mCursor=null;
         }
